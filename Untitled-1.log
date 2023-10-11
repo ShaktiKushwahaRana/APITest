@@ -1,0 +1,281 @@
+/*
+* Author : Shakti Rana
+* Created Date :10 July 2023
+* Description : demand Api for SAP integration.
+*/
+
+@RestResource(urlMapping='/demand/*')
+global class DemandApi {
+    
+    @HttpGet
+    global static Void getdemandRecord() {
+        //Validation on input parameters
+        Date CreatedDate;
+      	RestResponse res = RestContext.response;
+        try {
+            CreatedDate = Date.parse(RestContext.request.params.get('CreatedDate')); // Format dd/mm/yyyy
+            CreatedDate=CreatedDate.addDays(1); // Added as we are getting 1 day less 
+        } catch (TypeException ex) {
+           res.statusCode = 400;
+           String  jsonResponse = '{"response": {"status": "Failure", "message": "' + ex + '"}}';
+           res.responseBody = blob.valueOf(jsonResponse);
+           return;
+        }
+        String CompanyCode = RestContext.request.params.get('CompanyCode');
+        if(CompanyCode==null || CompanyCode=='' ){
+           res.statusCode = 400;
+           String  jsonResponse = '{"response": {"status": "Failure", "message": "' + 'mandatory Fields are Missing' + '"}}';
+           res.responseBody = blob.valueOf(jsonResponse);
+           return;
+        }
+        
+        try{
+            // Data Sync  concept here in 
+            Set<String>dataSyncInProgress=new Set<String>();
+        	Set<String> demandIdsList=new Set<String>();
+            Map<String,String> demand_SapGSTDescriptionMap=new Map<String,String>();
+            
+        	for (Data_Sync__c dataSync:[Select id,Event_Type__c,RecordId__c, Status__c from Data_Sync__c where Status__c ='Pending' and Event_Type__c='Demand']){
+            	demandIdsList.add(dataSync.RecordId__c);
+                
+        	}
+            if(demandIdsList.size()>0){
+               for(SAP_GST_Sync__c sapRecord:[ select id,RecordId__c, JSON_count__c from SAP_GST_Sync__c where RecordId__c IN :demandIdsList]){
+                	demand_SapGSTDescriptionMap.put(sapRecord.RecordId__c,sapRecord.JSON_count__c);
+            	} 
+            }
+            
+        	// Fetch detail object data
+        	Map<String,DemandWrapper> demandRecordsMap=new Map<String,DemandWrapper>();
+        	Set<String> bankAccNumber=new Set<String>();
+        	Set<String>BookingIds=new Set<String>();
+        	Set<String> stateList=new Set<String>();
+            
+        	if(demandIdsList.size()>0){
+            	for(Demand__c   demandRecord:[SELECT Id, CreatedDate,Demand_Due_Date__c, Booking__r.Project_Name__r.Builder_Organization__r.GST_Bank_Account_Number__c ,
+                                      Booking__r.Name, 
+                                      Booking__r.Project_Name__r.Profit_centre__c, Booking__r.Id, Booking__r.Project_Name__r.Builder_Organization__r.Company_code__c,
+                                      Booking__r.Project_Name__r.State__c, Booking__r.Project_Name__r.Builder_Organization__r.Bank_Account_Number__c,Booking__r.Project_Name__r.Builder_Organization__r.Bank_Name__c FROM Demand__c 
+                                      where CreatedDate <= :CreatedDate and Booking__r.Project_Name__r.Builder_Organization__r.Company_code__c=:CompanyCode AND Category__c ='Milestone Based' AND Sap_Code__c=null AND Id IN :demandIdsList]){
+          			BookingIds.add(demandRecord.Booking__r.Id);
+                    dataSyncInProgress.add(demandRecord.id);
+                    DemandWrapper demwrap=new DemandWrapper();
+          			demwrap.DemandId=demandRecord.id;
+                    demwrap.BankName=demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Bank_Name__c!=null?demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Bank_Name__c:'';
+                    demwrap.BankAccountNumber=demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Bank_Account_Number__c !=null ? demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Bank_Account_Number__c:'';
+          			bankAccNumber.add(demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Bank_Account_Number__c);
+                    demwrap.DemandDueDate=String.valueOf(date.newinstance(demandRecord.Demand_Due_Date__c.year(), demandRecord.Demand_Due_Date__c.month(), demandRecord.Demand_Due_Date__c.day()));  //demandRecord.Demand_Due_Date__c
+          			demwrap.State=demandRecord.Booking__r.Project_Name__r.State__c;
+          			demwrap.CreatedDate=String.valueOf(date.newinstance(demandRecord.CreatedDate.year(), demandRecord.CreatedDate.month(), demandRecord.CreatedDate.day())); //date.newinstance(dT.year(), dT.month(), dT.day() demandRecord.CreatedDate
+          			demwrap.BookingName=demandRecord.Booking__r.Name;
+          			demwrap.ProfitCentre=demandRecord.Booking__r.Project_Name__r.Profit_centre__c;
+          			demwrap.BookingId=demandRecord.Booking__r.Id;
+          			demwrap.CompanyCode=demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.Company_code__c;
+          			demwrap.GSTAccountNumber=demandRecord.Booking__r.Project_Name__r.Builder_Organization__r.GST_Bank_Account_Number__c;
+          			demandRecordsMap.put(demandRecord.id,demwrap);
+          			if(demandRecord.Booking__r!=null && demandRecord.Booking__r.Project_Name__r !=null && demandRecord.Booking__r.Project_Name__r.State__c !=null ){
+                         stateList.add((demandRecord.Booking__r.Project_Name__r.State__c.toUpperCase())+' CGST');
+                         stateList.add((demandRecord.Booking__r.Project_Name__r.State__c.toUpperCase())+' SGST');
+                    }
+          		}
+        	}
+        // State GL Code from custom metadata
+        Map<String,string>stateGLCodeMap=new Map<String,String>();
+        if(stateList.size()>0){
+            for(State_GL_Codes__mdt stateGL :[Select id,GLCode__c,label from State_GL_Codes__mdt where Label in:stateList]){
+                stateGLCodeMap.put(stateGL.label,stateGL.GLCode__c);
+            }      
+        }
+        Map<String,String> BankGLCodes=new Map<String,String>();
+        if(bankAccNumber.size()>0){
+            for(Bank_Mapping_with_Bank_G_L__mdt GLCodes:[ select id, label, Bank_G_L__c, Bank_Account_Number__c  from Bank_Mapping_with_Bank_G_L__mdt   where Bank_Account_Number__c IN :bankAccNumber]){
+                BankGLCodes.put(GLCodes.Bank_Account_Number__c,GLCodes.Bank_G_L__c);
+            }
+        }
+       Map<String,CoApplicantWrapper>booking_CoApplicant=new Map<String,CoApplicantWrapper>();
+       if(BookingIds.size()>0){
+            for(Co_Applicant__c  coappl:[Select id,Booking__r.Id,Sap_Code__c,Account__r.GST_No__c from Co_Applicant__c where Booking__r.Id !=null  AND Booking__r.Id IN :BookingIds AND Role__c='Primary' ]){ //select id, (select id from Co_Applicant__r LIMIT 1 ) from Booking__c  Where Id IN :BookingIds
+               	CoApplicantWrapper coApp=new CoApplicantWrapper();
+                coApp.CoApplicantId=coappl.id;
+                coApp.CustomerCode=coappl.Sap_Code__c;
+                if(coApp!=null && coappl.Account__r !=null && coappl.Account__r.GST_No__c !=null){
+                    coApp.CoapplicantGSTNumber=coappl.Account__r.GST_No__c;
+                }else{
+                    coApp.CoapplicantGSTNumber='';
+                }
+               	booking_CoApplicant.put(coappl.Booking__r.Id,coApp);
+              }  
+        }
+        Set<String> invoiceIds=new Set<String>();
+        Map<String,String> invoiceDemandMap=new Map<String,String>();
+        if(!demandRecordsMap.isEmpty()){
+            for(Invoice__c invoice:[select id,Demand__r.id from Invoice__c where Demand__r.id IN :demandRecordsMap.keySet() ]){
+               invoiceIds.add(invoice.id);
+               invoiceDemandMap.put(invoice.id,invoice.Demand__r.id);
+            }
+        }
+        Map<String,String> invoiceLineItem_InvoiceIdsMap=new Map<String,String>();
+        Map<String,InvoiceLineItemWrapper> invoiceLineItemMap=new Map<String,InvoiceLineItemWrapper>();
+        if(invoiceIds.size()>0){
+            for(Invoice_Line_Item__c invoiceLineItem:[ select id, Invoice__r.id,Amount__c, GST__c,Particular__c   from Invoice_Line_Item__c  where Invoice__r.id IN :invoiceIds]){
+               invoiceLineItem_InvoiceIdsMap.put(invoiceLineItem.id,invoiceLineItem.Invoice__r.id);
+               InvoiceLineItemWrapper ILIWrap=new InvoiceLineItemWrapper();
+               ILIWrap.InvoiceLineItemId=invoiceLineItem.id;
+               ILIWrap.Assignment=invoiceLineItem.id;
+               ILIWrap.Amount=invoiceLineItem.Amount__c;
+               ILIWrap.SGST=(0.5*invoiceLineItem.GST__c);
+               ILIWrap.CGST=(0.5*invoiceLineItem.GST__c);
+               ILIWrap.InvoiceId=invoiceLineItem.Invoice__r.id; 
+               ILIWrap.Particular=invoiceLineItem.Particular__c;
+               invoiceLineItemMap.put(invoiceLineItem.id,ILIWrap);
+            }
+        }
+        
+        //Create JSON
+        List<JSONGenerator> jsonGeneratorList = new List<JSONGenerator>();
+        Integer index = 1;
+        if(!demandRecordsMap.isEmpty()){
+            for(Invoice__c invoice:[select id,Demand__r.id,(Select id from Invoice_Line_Items__r) from Invoice__c where Demand__r.id IN :demandRecordsMap.keySet()]){
+               List<Invoice_Line_Item__c> lineItems = invoice.Invoice_Line_Items__r;
+               DemandWrapper demandWrap=demandRecordsMap.get(invoice.Demand__r.id);
+               String stateCode=ApiMappingHelper.stateToCodeMapping(demandWrap.State);
+                if(stateCode.length()==1){
+                    stateCode='0'+stateCode;
+                }
+                State_GL_Codes__mdt stateGL_SGST=[select id,GLCode__c, label from State_GL_Codes__mdt where label=:(demandWrap.State.toUpperCase()+' CGST') Limit 1];
+                String ProfitCentre=demandWrap.ProfitCentre!=null?demandWrap.ProfitCentre:'';
+                CoApplicantWrapper CoApplicant=booking_CoApplicant.get(demandWrap.BookingId);
+                String CompanyStateCode=demandWrap.CompanyCode.substring(0,2)+stateCode;
+                //---------------------------------------------
+                	Map<String,gstDescription> gstSapSync=new Map<String,gstDescription>();
+                    if(demand_SapGSTDescriptionMap.get(invoice.Demand__r.id)!=null){
+                       gstSapSync=getGstMap(demand_SapGSTDescriptionMap.get(invoice.Demand__r.id));
+                    }
+                //----------------------------------------------
+                 System.debug('gstSapSync'+gstSapSync);
+                JSONGenerator jsonGenerator1 = JSON.createGenerator(true);
+                jsonGenerator1.writeStartObject();
+				jsonGenerator1.writeNumberField('Count',index);
+				jsonGenerator1.writeStringField('BLDAT', demandWrap.CreatedDate);
+				jsonGenerator1.writeStringField('BLART', 'YB');
+                jsonGenerator1.writeStringField('BUKRS', demandWrap.CompanyCode);
+                jsonGenerator1.writeStringField('BUDAT', demandWrap.CreatedDate);
+                jsonGenerator1.writeStringField('WAERS', 'INR');
+                jsonGenerator1.writeStringField('XBLNR', CoApplicant!=null && CoApplicant.CoapplicantGSTNumber!=null ?CoApplicant.CoapplicantGSTNumber:'');//CoApplicant.CoapplicantGSTNumber
+                jsonGenerator1.writeStringField('BKTXT', demandWrap.BookingName+'-'+demandWrap.ProfitCentre);
+				jsonGenerator1.writeFieldName('LineItem');
+                jsonGenerator1.writeStartArray();
+                for( Invoice_Line_Item__c invItem :lineItems ){
+                    for(Integer i=0;i<3;i++){
+                       
+                    	InvoiceLineItemWrapper invoiceLineItem=invoiceLineItemMap.get(invItem.id);
+                        gstDescription SyncRec= gstSapSync.get(invoiceLineItem.Particular);
+                       // if(SyncRec.gstAmount==0){
+                           // continue;
+                       // }
+                    	jsonGenerator1.writeStartObject();
+                    	jsonGenerator1.writeStringField('BSCHL', i==0?'C':'G'); //
+                    	jsonGenerator1.writeStringField('ZUNOR', invoiceLineItem!=null?invoiceLineItem.Particular:'');
+                        //1000019
+                    	jsonGenerator1.writeStringField('GL',i==0?(CoApplicant!=null && CoApplicant.CustomerCode!=null?CoApplicant.CustomerCode:''): i==1?stateGLCodeMap.get(demandWrap.State.toUpperCase()+' CGST'):stateGLCodeMap.get(demandWrap.State.toUpperCase()+' SGST'));//i==0?'1000019': i==1?'28010601':'28010602'
+                    	//jsonGenerator1.writeStringField('AMTDOCCUR',i==0?(String.valueOf(2*(invoiceLineItem.SGST.setScale(2, RoundingMode.HALF_UP)))):String.valueOf(-(invoiceLineItem.SGST.setScale(2, RoundingMode.HALF_UP))));
+                    	Decimal Amt=SyncRec.gstAmount.setScale(2, RoundingMode.HALF_UP)-(SyncRec.gstAmount.setScale(2, RoundingMode.HALF_UP)-(2*((SyncRec.gstAmount/2).setScale(2, RoundingMode.HALF_UP))));
+                        jsonGenerator1.writeStringField('AMTDOCCUR',i==0?String.valueOf(Amt):String.valueOf(-(SyncRec.gstAmount/2).setScale(2, RoundingMode.HALF_UP)));
+                        jsonGenerator1.writeStringField('PRCTR', ProfitCentre);
+                    	jsonGenerator1.writeStringField('ACPIUMSKZ', i==0?'U':''); //
+                    	jsonGenerator1.writeStringField('ACPIZFBDT',i==0?demandWrap.DemandDueDate:'');
+                    	jsonGenerator1.writeStringField('XREF1', String.valueOf(invoiceLineItem.Amount.setScale(2, RoundingMode.HALF_UP)));
+                    	jsonGenerator1.writeStringField('XREF2', i==0?String.valueOf(SyncRec.gstAmount.setScale(2, RoundingMode.HALF_UP)):'');
+                    	jsonGenerator1.writeStringField('XREF3', demandWrap.DemandId);
+                    	jsonGenerator1.writeStringField('SGTXT', '');
+                    	jsonGenerator1.writeStringField('BUPLA', CompanyStateCode);
+                    	jsonGenerator1.writeStringField('TAXCODE', 'A0');
+                    	jsonGenerator1.writeStringField('VALUT', '');
+                    	jsonGenerator1.writeStringField('ACPIKIDNO', '');
+                    	jsonGenerator1.writeStringField('PSPOSID', '');
+                    
+                    jsonGenerator1.writeEndObject();
+                    }
+                    //continue;
+                }
+                jsonGenerator1.writeEndArray();
+                jsonGenerator1.writeEndObject();
+                jsonGeneratorList.add(jsonGenerator1);
+                index++;
+            }
+        }
+        String jsonString = '[';
+		for (JSONGenerator generator : jsonGeneratorList) {
+    		jsonString += generator.getAsString()+',';
+		}
+        if(jsonString.length()>2){
+            jsonString=jsonString.substring(0,jsonString.length()-1);
+        }
+       jsonString+= ']';
+       res.statusCode = 200;
+       res.responseBody = blob.valueOf(jsonString);
+            //Update dataSYnc
+       List<Data_Sync__c> DS_ToUpdate=new List<Data_Sync__c>();
+            if(dataSyncInProgress.size()>0){
+                for(Data_Sync__c DS:[select id,Status__c,RecordId__c from Data_Sync__c  where RecordId__c IN :dataSyncInProgress]){
+                    Data_Sync__c dataSync=new Data_Sync__c();
+                    dataSync.Status__c='In Progress';
+                    dataSync.Id=DS.id;
+                    dataSync.Request_Body__c=jsonString;
+                    DS_ToUpdate.add(dataSync);
+                }
+            }
+            if(DS_ToUpdate.size()>0){
+               // update DS_ToUpdate;
+            }
+     
+        }
+        Catch(Exception e){
+           res.statusCode = 400;
+           String  jsonResponse = '{"response": {"status": "Failure", "message": "' + e + '"}}';
+           res.responseBody = blob.valueOf(jsonResponse);
+           return;
+        }    
+     
+    }
+     public static Map<String,gstDescription> getGstMap(String jsonString){
+       Map<String, gstDescription> jsonMap=(Map<String, gstDescription>)JSON.deserialize(jsonString, Map<String, gstDescription>.class);
+       return jsonMap;
+    }
+     public class DemandWrapper {
+        public String DemandId;
+        public String CreatedDate;
+        public String BookingId;
+        public String CompanyCode;
+        public String GSTAccountNumber;
+        public String BookingName; 
+        public String ProfitCentre;
+        public String State;
+        public String DemandDueDate;
+        public String BankName;
+        public String BankAccountNumber;
+        public String GL_Code;
+    }
+     public class InvoiceLineItemWrapper {
+        public String InvoiceLineItemId;
+        public String Assignment;
+        public Decimal Amount;
+        public Decimal SGST;
+        public Decimal CGST;
+        public String InvoiceId;
+        public String Particular;
+    }
+    public class CoApplicantWrapper {
+        public String CoApplicantId;
+        public String CoapplicantGSTNumber;
+        public String CustomerCode;
+        
+    }
+    public class gstDescription{
+    	public decimal gstAmount;
+    	public string chargeName;
+        public decimal amount;
+    
+	}
+
+}
